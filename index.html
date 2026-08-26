@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D Realtime Multiplayer Game</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      overflow: hidden;
+      background-color: #000;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    #ui-container {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.85);
+      padding: 20px;
+      border-radius: 12px;
+      z-index: 100;
+      width: 280px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+      pointer-events: none;
+    }
+    h2 {
+      margin-bottom: 12px;
+      font-size: 18px;
+      text-align: center;
+      color: #4caf50;
+    }
+    #status {
+      font-size: 13px;
+      color: #ffca28;
+      text-align: center;
+      line-height: 1.4;
+    }
+    #controls-info {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #444;
+      font-size: 12px;
+      color: #aaa;
+      text-align: center;
+    }
+    #chat-container {
+      position: absolute;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: none;
+      z-index: 200;
+      width: 400px;
+    }
+    #chat-input {
+      width: 100%;
+      padding: 12px 16px;
+      border-radius: 24px;
+      border: 2px solid #4caf50;
+      background: rgba(0, 0, 0, 0.9);
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+    }
+  </style>
+
+  <!-- Three.js UMD -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  
+  <!-- Firebase SDK v8 UMD -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+</head>
+<body>
+
+  <div id="ui-container">
+    <h2>3D 멀티플레이어</h2>
+    <div id="status">연결 중...</div>
+    <div id="controls-info">
+      <p>이동: WASD / 방향키</p>
+      <p>점프: Space (상대방 밟기 가능)</p>
+      <p>채팅: T키 입력 후 Enter</p>
+      <p><small>(녹색: 나 / 주황색: 다른 플레이어)</small></p>
+    </div>
+  </div>
+
+  <div id="chat-container">
+    <input type="text" id="chat-input" maxlength="100" placeholder="메시지 입력 (최대 100자)..." />
+  </div>
+
+  <script>
+    // 1. Firebase 설정 및 초기화
+    const firebaseConfig = {
+      apiKey: "AIzaSyC9czxn4jVG7V7Nui9COzkyEGV2xxIB_ZM",
+      authDomain: "test-game-25cc6.firebaseapp.com",
+      projectId: "test-game-25cc6",
+      storageBucket: "test-game-25cc6.firebasestorage.app",
+      messagingSenderId: "229498507763",
+      appId: "1:229498507763:web:75978cb42462b620348286",
+      measurementId: "G-DV9WBEPF50",
+      databaseURL: "https://test-game-25cc6-default-rtdb.firebaseio.com"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const myUid = 'user_' + Math.random().toString(36).substr(2, 9);
+    const otherPlayers = {};
+    const statusDiv = document.getElementById('status');
+    const chatContainer = document.getElementById('chat-container');
+    const chatInput = document.getElementById('chat-input');
+
+    // 2. Three.js 기본 씬 설정
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = new THREE.Fog(0x87ceeb, 20, 80);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // 조명
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(10, 20, 15);
+    dirLight.castShadow = true;
+    scene.add(dirLight);
+
+    // 바닥
+    const gridHelper = new THREE.GridHelper(100, 100, 0x444444, 0x222222);
+    gridHelper.position.y = 0.01;
+    scene.add(gridHelper);
+
+    const floorGeometry = new THREE.PlaneGeometry(100, 100);
+    const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.8 });
+    const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+    floor.rotation.x = -Math.PI / 2;
+    floor.receiveShadow = true;
+    scene.add(floor);
+
+    // 3. 캔버스 기반 말풍선 텍스처 생성 함수
+    function createBubbleSprite(message) {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = 512;
+      canvas.height = 128;
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 4;
+
+      // 둥근 사각형 둥글기
+      const x = 10, y = 10, w = 492, h = 108, r = 20;
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = 'Bold 22px sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      // 긴 텍스트 줄바꿈 처리
+      const maxLineWidth = 460;
+      let words = message.split('');
+      let line = '';
+      let lines = [];
+
+      for (let n = 0; n < words.length; n++) {
+        let testLine = line + words[n];
+        let metrics = ctx.measureText(testLine);
+        if (metrics.width > maxLineWidth && n > 0) {
+          lines.push(line);
+          line = words[n];
+        } else {
+          line = testLine;
+        }
+      }
+      lines.push(line);
+
+      const lineHeight = 28;
+      const startY = (canvas.height / 2) - ((lines.length - 1) * lineHeight / 2);
+      lines.forEach((l, idx) => {
+        ctx.fillText(l, canvas.width / 2, startY + (idx * lineHeight));
+      });
+
+      const texture = new THREE.CanvasTexture(canvas);
+      const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      const sprite = new THREE.Sprite(spriteMaterial);
+      sprite.scale.set(4, 1, 1);
+      sprite.position.set(0, 1.5, 0);
+      return sprite;
+    }
+
+    // 4. 플레이어 관련 객체 및 물리 변수
+    const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const myMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+    const myCube = new THREE.Mesh(cubeGeometry, myMaterial);
+
+    const initialPos = {
+      x: (Math.random() - 0.5) * 10,
+      y: 0.5,
+      z: (Math.random() - 0.5) * 10
+    };
+
+    myCube.position.set(initialPos.x, initialPos.y, initialPos.z);
+    myCube.castShadow = true;
+    scene.add(myCube);
+
+    // 내 물리 관련 변수
+    let velocityY = 0;
+    const gravity = -0.015;
+    const jumpPower = 0.35;
+    let isGrounded = false;
+
+    // 말풍선 제어 변수
+    let myBubbleSprite = null;
+    let myBubbleTimer = null;
+
+    // Firebase 위치 등록
+    const myRef = db.ref('players/' + myUid);
+    myRef.set({
+      x: initialPos.x,
+      y: initialPos.y,
+      z: initialPos.z,
+      chatMsg: ""
+    });
+    myRef.onDisconnect().remove();
+
+    statusDiv.innerText = "접속 완료! (ID: " + myUid + ")";
+
+    // 다른 플레이어 생성 함수
+    function createOtherPlayerCube() {
+      const otherMaterial = new THREE.MeshStandardMaterial({ color: 0xffa500 });
+      const otherCube = new THREE.Mesh(cubeGeometry, otherMaterial);
+      otherCube.castShadow = true;
+      scene.add(otherCube);
+      return {
+        mesh: otherCube,
+        bubbleSprite: null,
+        bubbleTimer: null
+      };
+    }
+
+    // 5. Firebase 실시간 동기화
+    const playersRef = db.ref('players');
+
+    playersRef.on('value', (snapshot) => {
+      const data = snapshot.val();
+      if (!data) return;
+
+      Object.keys(data).forEach((uid) => {
+        if (uid === myUid) return;
+
+        const playerData = data[uid];
+
+        if (!otherPlayers[uid]) {
+          otherPlayers[uid] = createOtherPlayerCube();
+        }
+
+        const target = otherPlayers[uid];
+        target.mesh.position.set(playerData.x, playerData.y, playerData.z);
+
+        // 상대방 말풍선 처리
+        if (playerData.chatMsg && playerData.chatMsg.trim() !== "") {
+          if (target.bubbleSprite) {
+            target.mesh.remove(target.bubbleSprite);
+          }
+          if (target.bubbleTimer) clearTimeout(target.bubbleTimer);
+
+          target.bubbleSprite = createBubbleSprite(playerData.chatMsg);
+          target.mesh.add(target.bubbleSprite);
+
+          target.bubbleTimer = setTimeout(() => {
+            if (target.bubbleSprite) {
+              target.mesh.remove(target.bubbleSprite);
+              target.bubbleSprite = null;
+            }
+          }, 5000);
+        }
+      });
+    });
+
+    playersRef.on('child_removed', (snapshot) => {
+      const removedUid = snapshot.key;
+      if (otherPlayers[removedUid]) {
+        scene.remove(otherPlayers[removedUid].mesh);
+        delete otherPlayers[removedUid];
+      }
+    });
+
+    // 6. 키보드 조작 및 채팅 시스템
+    const keysPressed = {};
+    const moveSpeed = 0.12;
+    let isChatActive = false;
+
+    window.addEventListener('keydown', (e) => {
+      if (isChatActive) {
+        if (e.key === 'Enter') {
+          sendChatMessage();
+        }
+        return;
+      }
+
+      if (e.key.toLowerCase() === 't') {
+        e.preventDefault();
+        openChat();
+        return;
+      }
+
+      keysPressed[e.key.toLowerCase()] = true;
+      if (e.code === 'Space') {
+        keysPressed['space'] = true;
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (isChatActive) return;
+      keysPressed[e.key.toLowerCase()] = false;
+      if (e.code === 'Space') {
+        keysPressed['space'] = false;
+      }
+    });
+
+    function openChat() {
+      isChatActive = true;
+      chatContainer.style.display = 'block';
+      chatInput.value = '';
+      chatInput.focus();
+    }
+
+    function sendChatMessage() {
+      const msg = chatInput.value.trim();
+      chatContainer.style.display = 'none';
+      chatInput.blur();
+      isChatActive = false;
+
+      if (msg !== "") {
+        // 내 말풍선 렌더링
+        if (myBubbleSprite) {
+          myCube.remove(myBubbleSprite);
+        }
+        if (myBubbleTimer) clearTimeout(myBubbleTimer);
+
+        myBubbleSprite = createBubbleSprite(msg);
+        myCube.add(myBubbleSprite);
+
+        myBubbleTimer = setTimeout(() => {
+          if (myBubbleSprite) {
+            myCube.remove(myBubbleSprite);
+            myBubbleSprite = null;
+          }
+        }, 5000);
+
+        // Firebase에 메세지 전송
+        myRef.update({ chatMsg: msg });
+        setTimeout(() => {
+          myRef.update({ chatMsg: "" });
+        }, 500);
+      }
+    }
+
+    // 7. 충돌 판정 (AABB Box Collision)
+    function checkAABBCollision(posA, posB) {
+      const size = 1.0; // 상자 크기 (1x1x1)
+      return (
+        Math.abs(posA.x - posB.x) < size &&
+        Math.abs(posA.y - posB.y) < size &&
+        Math.abs(posA.z - posB.z) < size
+      );
+    }
+
+    // 8. 이동 및 물리 업데이트
+    function updateMovement() {
+      if (isChatActive) return;
+
+      let nextX = myCube.position.x;
+      let nextZ = myCube.position.z;
+
+      if (keysPressed['w'] || keysPressed['arrowup']) nextZ -= moveSpeed;
+      if (keysPressed['s'] || keysPressed['arrowdown']) nextZ += moveSpeed;
+      if (keysPressed['a'] || keysPressed['arrowleft']) nextX -= moveSpeed;
+      if (keysPressed['d'] || keysPressed['arrowright']) nextX += moveSpeed;
+
+      // X축 이동 및 충돌 체크
+      let tempPos = { x: nextX, y: myCube.position.y, z: myCube.position.z };
+      let collideX = false;
+      Object.keys(otherPlayers).forEach((uid) => {
+        if (checkAABBCollision(tempPos, otherPlayers[uid].mesh.position)) {
+          collideX = true;
+        }
+      });
+      if (!collideX) {
+        myCube.position.x = nextX;
+      }
+
+      // Z축 이동 및 충돌 체크
+      tempPos = { x: myCube.position.x, y: myCube.position.y, z: nextZ };
+      let collideZ = false;
+      Object.keys(otherPlayers).forEach((uid) => {
+        if (checkAABBCollision(tempPos, otherPlayers[uid].mesh.position)) {
+          collideZ = true;
+        }
+      });
+      if (!collideZ) {
+        myCube.position.z = nextZ;
+      }
+
+      // 수직 Y축 중력 및 점프 처리
+      velocityY += gravity;
+      let nextY = myCube.position.y + velocityY;
+
+      isGrounded = false;
+      let highestFloor = 0.5; // 기본 바닥 높이
+
+      // 다른 플레이어 머리 위 밟기 체크
+      Object.keys(otherPlayers).forEach((uid) => {
+        const otherPos = otherPlayers[uid].mesh.position;
+        // X, Z 축 범위 안에 겹쳐있는 경우
+        if (Math.abs(myCube.position.x - otherPos.x) < 0.9 && Math.abs(myCube.position.z - otherPos.z) < 0.9) {
+          // 상대방 위에 있을 때
+          if (myCube.position.y >= otherPos.y + 0.9) {
+            const playerHeadHeight = otherPos.y + 1.0;
+            if (playerHeadHeight > highestFloor) {
+              highestFloor = playerHeadHeight;
+            }
+          }
+        }
+      });
+
+      if (nextY <= highestFloor) {
+        nextY = highestFloor;
+        velocityY = 0;
+        isGrounded = true;
+      }
+
+      if (keysPressed['space'] && isGrounded) {
+        velocityY = jumpPower;
+        isGrounded = false;
+      }
+
+      myCube.position.y = nextY;
+
+      // 위치 정보 Firebase에 실시간 업로드
+      myRef.update({
+        x: myCube.position.x,
+        y: myCube.position.y,
+        z: myCube.position.z
+      });
+
+      // 카메라 조절
+      camera.position.x = myCube.position.x;
+      camera.position.y = myCube.position.y + 8;
+      camera.position.z = myCube.position.z + 12;
+      camera.lookAt(myCube.position);
+    }
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // 9. 메인 렌더링 루프
+    function animate() {
+      requestAnimationFrame(animate);
+      updateMovement();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
+</body>
+</html>
